@@ -16,26 +16,22 @@ struct UBO {
 
 @group(0)
 @binding(0)
-var<storage, read_write> outputColorBuffer: array<u32>;
+var<storage, read_write> outputColorBuffer: array<atomic<u32>>;
 
 @group(0)
 @binding(1)
-var<storage, read_write> outputDepthBuffer: array<u32>;
+var<storage, read_write> outputColorBuffer2: array<atomic<u32>>;
 
 @group(0)
 @binding(2)
-var<storage, read_write> fragmentsCounter: array<atomic<u32>>;
-
-@group(0)
-@binding(3)
 var<uniform> uniforms: UBO;
 
 @group(0)
-@binding(4)
+@binding(3)
 var<storage, read> vertexBuffer: array<f32>;
 
 @group(0)
-@binding(5)
+@binding(4)
 var myTexture: texture_2d<f32>;
 
 fn setPixelColor(pos: vec2<u32>, color: vec4<f32>, depth: f32) {
@@ -44,14 +40,21 @@ fn setPixelColor(pos: vec2<u32>, color: vec4<f32>, depth: f32) {
     }
 
     var index = pos.x + pos.y * u32(uniforms.width);
-    let fragmentLocalIndex = atomicAdd(&fragmentsCounter[index], 1u);
-    if (fragmentLocalIndex >= fragmentsPerPixel) {
-        return;
-    }
+    
+    let mappedDepth     = mix(0.5, 1.0, depth);                       // make sure depth has always the same exponent
+    var depthBits: u32  = bitcast<u32>(mappedDepth);                  // extract bits
+    depthBits           = depthBits << 9;                             // remove sign and exponent
+    depthBits           = insertBits(depthBits, 0u, 0, 12);           // reserve last 12 bits for color
 
-    let colorDepthIndex = pos.x * fragmentsPerPixel + pos.y * u32(uniforms.width) * fragmentsPerPixel + fragmentLocalIndex;
-    outputColorBuffer[colorDepthIndex] = pack4x8unorm(color);
-    outputDepthBuffer[colorDepthIndex] = u32(f32(0xFFFFFFFFu) * depth);
+    var colorBits: u32 = pack4x8unorm(vec4<f32>(color.rgb, 0.));      // [a, b, g, r]
+    var bhg: u32 = extractBits(colorBits, 12, 12);                    // blue channel and half green
+    let depthBHG = depthBits | bhg;
+
+    var hgr: u32 = extractBits(colorBits, 0, 12);                    // half green and red channel
+    let depthHGR = depthBits | hgr;
+
+    atomicMin(&outputColorBuffer[index], depthBHG);
+    atomicMin(&outputColorBuffer2[index], depthHGR);
 }
 
 fn ndcToViewport(ndc: vec2<f32>) -> vec2<i32> {
@@ -135,13 +138,8 @@ fn clear(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     var index = id.x + id.y * u32(uniforms.width);
-    atomicStore(&fragmentsCounter[index], 0u);
-    
-    for (var i = 0u; i < fragmentsPerPixel; i = i + 1u) {
-        let colorDepthIndex = id.x * fragmentsPerPixel + id.y * u32(uniforms.width) * fragmentsPerPixel + i;
-        outputColorBuffer[colorDepthIndex] = 0xFF000000u;
-        outputDepthBuffer[colorDepthIndex] = 0xFFFFFFFFu;
-    }
+    atomicStore(&outputColorBuffer[index], 0xFFFFF000u);
+    atomicStore(&outputColorBuffer2[index], 0xFFFFF000u);
 }
 
 @compute
@@ -201,11 +199,7 @@ var<storage> finalColorBufferFS: array<u32>;
 
 @group(0)
 @binding(2)
-var<storage> finalDepthBufferFS: array<u32>;
-
-@group(0)
-@binding(3)
-var<storage> finalFragmentsCounter: array<u32>;
+var<storage> finalColorBuffer2FS: array<u32>;
 
 @group(0)
 @binding(0)
@@ -226,51 +220,21 @@ fn fullScreenVert(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<
 
 @fragment
 fn fullScreenFrag(@builtin(position) coord: vec4<f32>) -> @location(0) vec4<f32> {
-    let X = u32(coord.x);
-    let Y = u32(coord.y);
-    let index = X + Y * u32(uniformsFS.width);
+    let X = floor(coord.x);
+    let Y = floor(coord.y);
+    let index = u32(X + Y * uniformsFS.width);
+
     
-    var colors:  array<u32, fragmentsPerPixel> = array<u32, fragmentsPerPixel>();
-    var depths: array<u32, fragmentsPerPixel> = array<u32, fragmentsPerPixel>();
+    var depthBHG: u32 = finalColorBufferFS[index];     // decode blue and half green channel (with 20 bits of depth in front)
+    var bhg: u32      = extractBits(depthBHG, 0, 12);  // remove 
+    bhg = bhg << 12;                                   // save space for rhg
 
-    for (var i = 0u; i < fragmentsPerPixel; i = i + 1u) {
-        let colorDepthIndex = X * fragmentsPerPixel + Y * u32(uniformsFS.width) * fragmentsPerPixel + i;
-        colors[i] = finalColorBufferFS[colorDepthIndex];
-        depths[i] = finalDepthBufferFS[colorDepthIndex];
-    }
+    var depthHGR: u32 = finalColorBuffer2FS[index];    // decode half green and red channel (with 20 bits of depth in front) 
+    var hgr: u32      = extractBits(depthHGR, 0, 12);  // remove depth 
 
-    // Sort fragments
-    //let frags = finalFragmentsCounter[index];
-    for (var i = 0u; i < fragmentsPerPixel - 1; i = i + 1u) {
-        var minIndex = i;
-        for (var j = i + 1u; j < fragmentsPerPixel; j = j + 1u) {
-            if (depths[j] > depths[minIndex]) {
-                minIndex = j;
-            }
-        }
-        let tmpColor = colors[i];
-        colors[i] = colors[minIndex];
-        colors[minIndex] = tmpColor;
+    var abgr: u32 = bhg | hgr;
+    //insertBits(abgr, 1u, 0, 8);                          // set alpha to 1, useless in this case
 
-        let tmpDepth = depths[i];
-        depths[i] = depths[minIndex];
-        depths[minIndex] = tmpDepth;
-    }
-
-    var finalColor: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
-    for (var i = 0u; i < fragmentsPerPixel; i = i + 1u) {
-        let c = unpack4x8unorm(colors[i]);
-        finalColor = c.rgb * 0.7 + finalColor * 0.3;
-    }
-
-    // var minIdx = 0u;
-    // var minDepth = depths[minIdx];
-    // for (var i = 1u; i < fragmentsPerPixel; i = i + 1u) {
-    //     if (depths[i] < minDepth) {
-    //         minDepth = depths[i];
-    //         minIdx = i;
-    //     }
-    // }
-
-    return vec4<f32>(finalColor, 1.0);
+    let finalColor = unpack4x8unorm(abgr);
+    return vec4<f32>(finalColor.xyz, 1.0);
 }

@@ -5,7 +5,6 @@ import { FreeControlledCamera } from "./camera";
 import { loadModel } from "./loadModel";
 
 const USE_DEVICE_PIXEL_RATIO = true;
-const FRAGMENTS_PER_PIXEL = 10;
 
 interface IRenderingContext {
     device: GPUDevice;
@@ -59,9 +58,8 @@ async function init(
 function createFullscreenPass(
     context: IRenderingContext,
     colorBuffer: GPUBuffer,
-    depthBuffer: GPUBuffer,
-    uniformBuffer: GPUBuffer,
-    fragCounterBuffer: GPUBuffer
+    colorBuffer2: GPUBuffer,
+    uniforms: GPUBuffer
 ) {
     const fullscreenBindGroupLayout = context.device.createBindGroupLayout({
         label: "full screen bind group layout",
@@ -75,21 +73,14 @@ function createFullscreenPass(
             },
             {
                 binding: 1,
-                visibility: GPUShaderStage.FRAGMENT, // color buffer
+                visibility: GPUShaderStage.FRAGMENT, // color buffer 1
                 buffer: {
                     type: "read-only-storage",
                 },
             },
             {
                 binding: 2,
-                visibility: GPUShaderStage.FRAGMENT, // depth buffer
-                buffer: {
-                    type: "read-only-storage",
-                },
-            },
-            {
-                binding: 3,
-                visibility: GPUShaderStage.FRAGMENT, // frag count buffer,
+                visibility: GPUShaderStage.FRAGMENT, // color buffer 2
                 buffer: {
                     type: "read-only-storage",
                 },
@@ -128,7 +119,7 @@ function createFullscreenPass(
             {
                 binding: 0,
                 resource: {
-                    buffer: uniformBuffer,
+                    buffer: uniforms,
                 },
             },
             {
@@ -140,13 +131,7 @@ function createFullscreenPass(
             {
                 binding: 2,
                 resource: {
-                    buffer: depthBuffer,
-                },
-            },
-            {
-                binding: 3,
-                resource: {
-                    buffer: fragCounterBuffer,
+                    buffer: colorBuffer2,
                 },
             },
         ],
@@ -221,20 +206,15 @@ function createComputePass(
 
     const outputColorBufferSize =
         Uint32Array.BYTES_PER_ELEMENT * (WIDTH * HEIGHT);
-    const outputColorBuffer = context.device.createBuffer({
+
+    const colorBuffer1 = context.device.createBuffer({
         label: "output color buffer 1",
-        size: outputColorBufferSize * FRAGMENTS_PER_PIXEL,
+        size: outputColorBufferSize,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
 
-    const depthBuffer = context.device.createBuffer({
+    const colorBuffer2 = context.device.createBuffer({
         label: "output depth buffer",
-        size: outputColorBufferSize * FRAGMENTS_PER_PIXEL,
-        usage: GPUBufferUsage.STORAGE,
-    });
-
-    const fragmentsCountBuffer = context.device.createBuffer({
-        label: "fragments count buffer",
         size: outputColorBufferSize,
         usage: GPUBufferUsage.STORAGE,
     });
@@ -260,41 +240,34 @@ function createComputePass(
         entries: [
             {
                 binding: 0,
-                visibility: GPUShaderStage.COMPUTE, // color buffer
+                visibility: GPUShaderStage.COMPUTE, // color buffer 1
                 buffer: {
                     type: "storage",
                 },
             },
             {
                 binding: 1,
-                visibility: GPUShaderStage.COMPUTE, // depth buffer
+                visibility: GPUShaderStage.COMPUTE, // color buffer 2
                 buffer: {
                     type: "storage",
                 },
             },
             {
                 binding: 2,
-                visibility: GPUShaderStage.COMPUTE, // fragments count buffer
-                buffer: {
-                    type: "storage",
-                },
-            },
-            {
-                binding: 3,
                 visibility: GPUShaderStage.COMPUTE, // uniform
                 buffer: {
                     type: "uniform",
                 },
             },
             {
-                binding: 4,
+                binding: 3,
                 visibility: GPUShaderStage.COMPUTE, // vertex buffer
                 buffer: {
                     type: "read-only-storage",
                 },
             },
             {
-                binding: 5,
+                binding: 4,
                 visibility: GPUShaderStage.COMPUTE,
                 texture: {
                     viewDimension: "2d",
@@ -309,35 +282,29 @@ function createComputePass(
             {
                 binding: 0,
                 resource: {
-                    buffer: outputColorBuffer,
+                    buffer: colorBuffer1,
                 },
             },
             {
                 binding: 1,
                 resource: {
-                    buffer: depthBuffer,
+                    buffer: colorBuffer2,
                 },
             },
             {
                 binding: 2,
                 resource: {
-                    buffer: fragmentsCountBuffer,
+                    buffer: UBOBuffer,
                 },
             },
             {
                 binding: 3,
                 resource: {
-                    buffer: UBOBuffer,
-                },
-            },
-            {
-                binding: 4,
-                resource: {
                     buffer: gpuVertexBuffer,
                 },
             },
             {
-                binding: 5,
+                binding: 4,
                 resource: baseColorTexture.createView(),
             },
         ],
@@ -405,10 +372,9 @@ function createComputePass(
 
     return {
         addComputePass,
-        outputColorBuffer,
-        depthBuffer,
+        colorBuffer1,
+        colorBuffer2,
         UBOBuffer,
-        fragmentsCountBuffer,
     };
 }
 
@@ -428,24 +394,18 @@ export async function run() {
         (2 * Math.PI) / 5,
         context.presentationSize[0] / context.presentationSize[1],
         0.1,
-        100
+        150
     );
     camera.activate();
 
-    const {
-        addComputePass,
-        outputColorBuffer,
-        depthBuffer,
-        UBOBuffer,
-        fragmentsCountBuffer,
-    } = createComputePass(context, vertexData, 5, baseColor);
+    const { addComputePass, colorBuffer1, colorBuffer2, UBOBuffer } =
+        createComputePass(context, vertexData, 5, baseColor);
 
     const { addFullscreenPass } = createFullscreenPass(
         context,
-        outputColorBuffer,
-        depthBuffer,
-        UBOBuffer,
-        fragmentsCountBuffer
+        colorBuffer1,
+        colorBuffer2,
+        UBOBuffer
     );
 
     let t = 0;
