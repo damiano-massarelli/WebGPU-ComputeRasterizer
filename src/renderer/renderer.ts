@@ -36,8 +36,8 @@ async function init(
     canvas.width = presentationSize[0];
     canvas.height = presentationSize[1];
 
-    const presentationFormat: GPUTextureFormat = "bgra8unorm";
-    //navigator.gpu.getPreferredCanvasFormat();
+    const presentationFormat: GPUTextureFormat =
+        navigator.gpu.getPreferredCanvasFormat();
     console.log(presentationFormat);
     context?.configure({
         device,
