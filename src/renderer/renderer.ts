@@ -5,6 +5,7 @@ import { FreeControlledCamera } from "./camera";
 import { loadModel } from "./loadModel";
 
 const USE_DEVICE_PIXEL_RATIO = true;
+const FRAGMENTS_PER_PIXEL = 10;
 
 interface IRenderingContext {
     device: GPUDevice;
@@ -23,7 +24,6 @@ async function init(
     const context = canvas.getContext("webgpu");
 
     const adapter = await navigator.gpu.requestAdapter();
-    console.log(adapter);
     const device = await adapter!.requestDevice();
 
     const devicePixelRatio = useDevicePixelRatio
@@ -43,7 +43,7 @@ async function init(
     context?.configure({
         device,
         format: presentationFormat,
-        compositingAlphaMode: "opaque",
+        alphaMode: "opaque",
         usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
     });
 
@@ -59,8 +59,9 @@ async function init(
 function createFullscreenPass(
     context: IRenderingContext,
     colorBuffer: GPUBuffer,
-    colorBuffer2: GPUBuffer,
-    uniformBuffer: GPUBuffer
+    depthBuffer: GPUBuffer,
+    uniformBuffer: GPUBuffer,
+    fragCounterBuffer: GPUBuffer
 ) {
     const fullscreenBindGroupLayout = context.device.createBindGroupLayout({
         label: "full screen bind group layout",
@@ -74,14 +75,21 @@ function createFullscreenPass(
             },
             {
                 binding: 1,
-                visibility: GPUShaderStage.FRAGMENT, // color buffer 1
+                visibility: GPUShaderStage.FRAGMENT, // color buffer
                 buffer: {
                     type: "read-only-storage",
                 },
             },
             {
                 binding: 2,
-                visibility: GPUShaderStage.FRAGMENT, // color buffer 2
+                visibility: GPUShaderStage.FRAGMENT, // depth buffer
+                buffer: {
+                    type: "read-only-storage",
+                },
+            },
+            {
+                binding: 3,
+                visibility: GPUShaderStage.FRAGMENT, // frag count buffer,
                 buffer: {
                     type: "read-only-storage",
                 },
@@ -132,7 +140,13 @@ function createFullscreenPass(
             {
                 binding: 2,
                 resource: {
-                    buffer: colorBuffer2,
+                    buffer: depthBuffer,
+                },
+            },
+            {
+                binding: 3,
+                resource: {
+                    buffer: fragCounterBuffer,
                 },
             },
         ],
@@ -165,7 +179,8 @@ function createFullscreenPass(
 function createComputePass(
     context: IRenderingContext,
     vertexBuffer: number[],
-    stride: number
+    stride: number,
+    baseColor: ImageBitmap
 ) {
     if (stride <= 0 || vertexBuffer.length % stride != 0) {
         throw new Error(
@@ -175,6 +190,22 @@ function createComputePass(
                 vertexBuffer.length
         );
     }
+
+    // Base color texture
+    const textureDescriptor: GPUTextureDescriptor = {
+        size: { width: baseColor.width, height: baseColor.height },
+        format: "rgba8unorm",
+        usage:
+            GPUTextureUsage.TEXTURE_BINDING |
+            GPUTextureUsage.COPY_DST |
+            GPUTextureUsage.RENDER_ATTACHMENT,
+    };
+    const baseColorTexture = context.device.createTexture(textureDescriptor);
+    context.device.queue.copyExternalImageToTexture(
+        { source: baseColor },
+        { texture: baseColorTexture },
+        textureDescriptor.size
+    );
 
     const WIDTH = context.presentationSize[0];
     const HEIGHT = context.presentationSize[1];
@@ -192,12 +223,18 @@ function createComputePass(
         Uint32Array.BYTES_PER_ELEMENT * (WIDTH * HEIGHT);
     const outputColorBuffer = context.device.createBuffer({
         label: "output color buffer 1",
-        size: outputColorBufferSize,
+        size: outputColorBufferSize * FRAGMENTS_PER_PIXEL,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
 
-    const outputColorBuffer2 = context.device.createBuffer({
-        label: "output color buffer 2",
+    const depthBuffer = context.device.createBuffer({
+        label: "output depth buffer",
+        size: outputColorBufferSize * FRAGMENTS_PER_PIXEL,
+        usage: GPUBufferUsage.STORAGE,
+    });
+
+    const fragmentsCountBuffer = context.device.createBuffer({
+        label: "fragments count buffer",
         size: outputColorBufferSize,
         usage: GPUBufferUsage.STORAGE,
     });
@@ -230,23 +267,37 @@ function createComputePass(
             },
             {
                 binding: 1,
-                visibility: GPUShaderStage.COMPUTE, // color buffer 2
+                visibility: GPUShaderStage.COMPUTE, // depth buffer
                 buffer: {
                     type: "storage",
                 },
             },
             {
                 binding: 2,
+                visibility: GPUShaderStage.COMPUTE, // fragments count buffer
+                buffer: {
+                    type: "storage",
+                },
+            },
+            {
+                binding: 3,
                 visibility: GPUShaderStage.COMPUTE, // uniform
                 buffer: {
                     type: "uniform",
                 },
             },
             {
-                binding: 3,
+                binding: 4,
                 visibility: GPUShaderStage.COMPUTE, // vertex buffer
                 buffer: {
                     type: "read-only-storage",
+                },
+            },
+            {
+                binding: 5,
+                visibility: GPUShaderStage.COMPUTE,
+                texture: {
+                    viewDimension: "2d",
                 },
             },
         ],
@@ -264,20 +315,30 @@ function createComputePass(
             {
                 binding: 1,
                 resource: {
-                    buffer: outputColorBuffer2,
+                    buffer: depthBuffer,
                 },
             },
             {
                 binding: 2,
                 resource: {
-                    buffer: UBOBuffer,
+                    buffer: fragmentsCountBuffer,
                 },
             },
             {
                 binding: 3,
                 resource: {
+                    buffer: UBOBuffer,
+                },
+            },
+            {
+                binding: 4,
+                resource: {
                     buffer: gpuVertexBuffer,
                 },
+            },
+            {
+                binding: 5,
+                resource: baseColorTexture.createView(),
             },
         ],
     });
@@ -342,7 +403,13 @@ function createComputePass(
         // );
     };
 
-    return { addComputePass, outputColorBuffer, outputColorBuffer2, UBOBuffer };
+    return {
+        addComputePass,
+        outputColorBuffer,
+        depthBuffer,
+        UBOBuffer,
+        fragmentsCountBuffer,
+    };
 }
 
 export async function run() {
@@ -352,12 +419,9 @@ export async function run() {
         return;
     }
 
-    const positions = await loadModel("models/suzanne.glb");
-    console.log(positions);
+    const { vertexData, baseColor } = await loadModel("models/dragon.gltf");
 
     const context = await init("canvas-wegbpu", USE_DEVICE_PIXEL_RATIO);
-    // prettier-ignore
-    const vertexBuffer = positions;
 
     const camera = new FreeControlledCamera(
         context.canvas,
@@ -368,14 +432,20 @@ export async function run() {
     );
     camera.activate();
 
-    const { addComputePass, outputColorBuffer, outputColorBuffer2, UBOBuffer } =
-        createComputePass(context, vertexBuffer, 3);
+    const {
+        addComputePass,
+        outputColorBuffer,
+        depthBuffer,
+        UBOBuffer,
+        fragmentsCountBuffer,
+    } = createComputePass(context, vertexData, 5, baseColor);
 
     const { addFullscreenPass } = createFullscreenPass(
         context,
         outputColorBuffer,
-        outputColorBuffer2,
-        UBOBuffer
+        depthBuffer,
+        UBOBuffer,
+        fragmentsCountBuffer
     );
 
     let t = 0;
@@ -383,12 +453,13 @@ export async function run() {
         const commandEncoder = context.device.createCommandEncoder();
 
         let modelMatrix = mat4.create();
-        mat4.translate(modelMatrix, modelMatrix, vec3.fromValues(0, 0, -10));
+        mat4.translate(modelMatrix, modelMatrix, vec3.fromValues(0, 10, -50));
+        mat4.scale(modelMatrix, modelMatrix, vec3.fromValues(0.3, -0.3, 0.3));
         mat4.rotate(
             modelMatrix,
             modelMatrix,
             0.01 * t,
-            vec3.fromValues(1, 0, 0)
+            vec3.fromValues(0, 1, 0)
         );
         // mat4.rotate(
         //     modelMatrix,

@@ -16,22 +16,55 @@ export async function loadModel(modelUri: string) {
         .listPrimitives()[0]
         .getIndices()
         ?.getArray();
-    const finalPositions = [];
+
+    const uvs = doc
+        .getRoot()
+        .listMeshes()[0]
+        .listPrimitives()[0]
+        .getAttribute("TEXCOORD_0")
+        ?.getArray();
+
+    const textureUri = doc
+        .getRoot()
+        .listMaterials()[0]
+        .getBaseColorTexture()
+        ?.getURI();
+
+    if (textureUri == null) {
+        throw new Error("Texture is null");
+    }
+
+    const basePath = modelUri.slice(0, modelUri.lastIndexOf("/"));
+
+    let textureBitmap = null;
+    try {
+        const response = await fetch(basePath + "/" + textureUri);
+        const textureBlob = await response.blob();
+        textureBitmap = await createImageBitmap(textureBlob, {});
+    } catch {
+        throw new Error("cannot load texture: " + basePath + "/" + textureUri);
+    }
+
+    const finalData = [];
 
     if (indices == null) {
         throw Error("indices are null :(");
-    } else if (positions == null) {
-        throw Error("positions are null :(");
+    } else if (positions == null || uvs == null) {
+        throw Error("positions or uvs are null :(");
     }
 
     for (let i = 0; i < indices.length; i++) {
-        const index1 = indices[i] * 3 + 0;
-        const index2 = indices[i] * 3 + 1;
-        const index3 = indices[i] * 3 + 2;
+        const posIndex1 = indices[i] * 3 + 0;
+        const posIndex2 = indices[i] * 3 + 1;
+        const posIndex3 = indices[i] * 3 + 2;
+        const uvIndex1 = indices[i] * 2 + 0;
+        const uvIndex2 = indices[i] * 2 + 1;
 
-        finalPositions.push(positions[index1]);
-        finalPositions.push(positions[index2]);
-        finalPositions.push(positions[index3]);
+        finalData.push(positions[posIndex1]);
+        finalData.push(positions[posIndex2]);
+        finalData.push(positions[posIndex3]);
+        finalData.push(uvs[uvIndex1]);
+        finalData.push(uvs[uvIndex2]);
     }
-    return finalPositions;
+    return { vertexData: finalData, baseColor: textureBitmap };
 }
