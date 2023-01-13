@@ -13,7 +13,7 @@
   "license": "ISC",
   "devDependencies": {
     "@types/dat.gui": "^0.7.7",
-    "@webgpu/types": "^0.1.23",
+    "@webgpu/types": "^0.1.24",
     "css-loader": "^6.5.1",
     "ts-loader": "^9.2.6",
     "ts-shader-loader": "^1.0.6",
